@@ -127,7 +127,7 @@ func lineChannel(r io.Reader) chan string {
 		buffer := bufio.NewReader(r)
 		for {
 			line, _ := buffer.ReadString(10)
-			line = strings.TrimRight(line, "\r\n")
+			line = strings.TrimSuffix(strings.TrimSuffix(line, "\r\n"), "\r");
 			if line == "" {
 				continue
 			}
@@ -169,6 +169,19 @@ func parsePacket(status, header, body string) Packet {
 		return ServiceStatus{args[0].(string)}
 	case "+ZDONR":
 		return NetworkStatus{args[0].(string)}
+	case "^RSSI":
+		return RSSIStatus{args[0].(int)}
+	case "^HCSQ":
+		switch len(args) {
+		case 2:
+			return SignalStatus{args[0].(string), args[1].(int), 0, 0, 0}
+		case 3:
+			return SignalStatus{args[0].(string), args[1].(int), args[2].(int), 0, 0}
+		case 4:
+			return SignalStatus{args[0].(string), args[1].(int), args[2].(int), args[3].(int), 0}
+		default:
+			return SignalStatus{args[0].(string), args[1].(int), args[2].(int), args[3].(int), args[4].(int)}
+		}
 	case "+CMTI":
 		return MessageNotification{args[0].(string), args[1].(int)}
 	case "+CSCA":
@@ -268,7 +281,7 @@ func (self *Modem) listen() {
 			if len(m) > 0 {
 				last = m[1]
 			}
-			echo = strings.TrimRight(line, "\r\n")
+			echo = strings.TrimSuffix(strings.TrimSuffix(line, "\r\n"), "\r");
 			self.port.Write([]byte(line))
 		}
 	}
@@ -327,11 +340,17 @@ func (self *Modem) init() error {
 	// often a benign error.
 	self.send("+CMGF", 1)
 
+	log.Println("Set SMS routing mode");
+	r, err := self.send("+CNMI", 0, 1, 0, 1, 1);
+	if err != nil {
+		return err
+	}
+
 	log.Println("Set SMS text mode")
 	// get SMSC
 	// the modem complains if SMSC hasn't been set, but stores it correctly, so
 	// query for stored value, then send a set from the query response.
-	r, err := self.send("+CSCA?")
+	r, err = self.send("+CSCA?")
 	if err != nil {
 		return err
 	}

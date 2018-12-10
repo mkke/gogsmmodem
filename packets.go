@@ -14,6 +14,20 @@ type NetworkStatus struct {
 	Network string
 }
 
+// ˆHCSQ
+type SignalStatus struct {
+	Signal string
+	RSSI int
+	RSSP int
+	SINR int
+	RSRQ int
+}
+
+// ^RSSI
+type RSSIStatus struct {
+	RSSI int
+}
+
 // +CMTI
 type MessageNotification struct {
 	Storage string
