@@ -10,10 +10,11 @@ Go library for the sending and receiving SMS messages through a GSM modem.
 ### Installation
 Run:
 
-    go get github.com/barnybug/gogsmmodem
+    go get github.com/mkke/gogsmmodem
 
 ### Usage
-Example:
+The caller opens the serial port, with any library that returns an
+`io.ReadWriteCloser`, and passes it to `New`. Example:
 
 ```go
 
@@ -22,14 +23,19 @@ package main
 import (
     "fmt"
 
-    "github.com/barnybug/gogsmmodem"
-    "github.com/tarm/serial"
+    "go.bug.st/serial"
+
+    "github.com/mkke/gogsmmodem"
 )
 
 func main() {
-    conf := serial.Config{Name: "/dev/ttyUSB1", Baud: 115200}
-    modem, err := gogsmmodem.Open(&conf, true)
+    port, err := serial.Open("/dev/ttyUSB1", &serial.Mode{BaudRate: 115200})
     if err != nil {
+        panic(err)
+    }
+    modem, err := gogsmmodem.New(port, true)
+    if err != nil {
+        port.Close()
         panic(err)
     }
 

@@ -2,13 +2,10 @@ package gogsmmodem
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"reflect"
 	"testing"
 	"time"
-
-	"github.com/tarm/serial"
 )
 
 var initReplay = []string{
@@ -20,6 +17,8 @@ var initReplay = []string{
 	"->AT+CPMS=\"SM\",\"SM\",\"SM\"\r\n",
 	"<-\r\n+CPMS: 50,50,50,50,50,50\r\nOK\n\n",
 	"->AT+CMGF=1\r\n",
+	"<-\r\nOK\r\n",
+	"->AT+CNMI=0,1,0,1,1\r\n",
 	"<-\r\nOK\r\n",
 	"->AT+CSCA?\r\n",
 	"<-\r\n+CSCA: \"+447802092035\",145\r\nOK\r\n",
@@ -42,10 +41,7 @@ func appendLists(ls ...[]string) []string {
 }
 
 func TestInit(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		return NewMockSerialPort(appendLists(initReplay)), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -84,16 +80,12 @@ var oobCommands = []Packet{
 	NetworkStatus{"O2-UK"},
 	ServiceStatus{"EDGE"},
 	ServiceStatus{"UMTS"},
-	UnknownPacket{"DODGY", []interface{}{}},
-	UnknownPacket{"+ZZZ", []interface{}{"A"}},
+	UnknownPacket{"DODGY", []any{}},
+	UnknownPacket{"+ZZZ", []any{"A"}},
 }
 
 func TestOOB(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(oobReplay, initReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(oobReplay, initReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -110,11 +102,7 @@ var receivedCommands = []Packet{
 }
 
 func TestIncoming(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, receivedReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, receivedReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -128,11 +116,7 @@ var messageReplay = []string{
 }
 
 func TestGetMessage(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, messageReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, messageReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -151,11 +135,7 @@ var missingMessageReplay = []string{
 }
 
 func TestGetMissingMessage(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, missingMessageReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, missingMessageReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -175,11 +155,7 @@ var sendMessageReplay = []string{
 }
 
 func TestSendMessage(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, sendMessageReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, sendMessageReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -198,11 +174,7 @@ var listMessagesReplay = []string{
 }
 
 func TestListMessages(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, listMessagesReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, listMessagesReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -230,11 +202,7 @@ var listMessagesEmptyReplay = []string{
 }
 
 func TestListMessagesEmpty(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, listMessagesEmptyReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, listMessagesEmptyReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -254,11 +222,7 @@ var storageAreasReplay = []string{
 }
 
 func TestSupportedStorageAreas(t *testing.T) {
-	OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-		replay := appendLists(initReplay, storageAreasReplay)
-		return NewMockSerialPort(replay), nil
-	}
-	modem, err := Open(&serial.Config{}, true)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, storageAreasReplay)), true)
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
@@ -269,7 +233,8 @@ func TestSupportedStorageAreas(t *testing.T) {
 		[]string{"ME", "MT", "SM", "SR"},
 		[]string{"ME", "MT", "SM", "SR"},
 	}
-	if fmt.Sprint(*msg) != fmt.Sprint(expected) {
+	got, want := fmt.Sprint(*msg), fmt.Sprint(expected)
+	if got != want {
 		t.Errorf("Expected: %#v, got %#v", expected, msg)
 	}
 	modem.Close()

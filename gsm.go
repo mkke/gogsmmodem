@@ -1,3 +1,7 @@
+// Package gogsmmodem sends and receives SMS messages through a GSM modem
+// that takes AT commands in text mode. New initialises the modem on a port
+// the caller has opened. The reports the modem sends without a command, such
+// as a new-message notification, arrive on Modem.OOB.
 package gogsmmodem
 
 import (
@@ -7,10 +11,12 @@ import (
 	"log"
 	"regexp"
 	"strings"
-
-	"github.com/tarm/serial"
 )
 
+// Modem is a GSM modem that New has initialised. Each method sends one AT
+// command and waits for its reply, so a Modem serves one caller at a time.
+// OOB carries the reports the modem sends without a command: message
+// notifications and service, network and signal status.
 type Modem struct {
 	OOB   chan Packet
 	Debug bool
@@ -19,17 +25,12 @@ type Modem struct {
 	tx    chan string
 }
 
-var OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-	return serial.OpenPort(config)
-}
-
-func Open(config *serial.Config, debug bool) (*Modem, error) {
-	port, err := OpenPort(config)
+// New initialises the modem on port and returns it. The caller opens port
+// with the line settings the modem needs, and closes it when New returns an
+// error. With debug set, every read from and write to port is logged.
+func New(port io.ReadWriteCloser, debug bool) (*Modem, error) {
 	if debug {
 		port = LogReadWriteCloser{port}
-	}
-	if err != nil {
-		return nil, err
 	}
 	oob := make(chan Packet, 16)
 	rx := make(chan Packet)
@@ -44,13 +45,14 @@ func Open(config *serial.Config, debug bool) (*Modem, error) {
 	// run send/receive goroutine
 	go modem.listen()
 
-	err = modem.init()
-	if err != nil {
+	if err := modem.init(); err != nil {
 		return nil, err
 	}
 	return modem, nil
 }
 
+// Close closes OOB and the port, and returns the error of closing the port.
+// The Modem cannot be used after Close.
 func (self *Modem) Close() error {
 	close(self.OOB)
 	close(self.rx)
@@ -99,6 +101,9 @@ func (self *Modem) ListMessages(filter string) (*MessageList, error) {
 	return &res, nil
 }
 
+// SupportedStorageAreas returns the message storage areas the modem offers
+// for reading, writing and receiving. It returns an error when the modem
+// answers with something other than that list.
 func (self *Modem) SupportedStorageAreas() (*StorageAreas, error) {
 	packet, err := self.send("+CPMS", "?")
 	if err != nil {
@@ -110,11 +115,14 @@ func (self *Modem) SupportedStorageAreas() (*StorageAreas, error) {
 	return nil, errors.New("Unexpected response type")
 }
 
+// DeleteMessage deletes the message at index n from the storage area.
 func (self *Modem) DeleteMessage(n int) error {
 	_, err := self.send("+CMGD", n)
 	return err
 }
 
+// SendMessage sends body as a text message to telephone. A character of body
+// that the GSM 03.38 alphabet does not hold is left out.
 func (self *Modem) SendMessage(telephone, body string) error {
 	enc := gsmEncode(body)
 	_, err := self.sendBody("+CMGS", enc, telephone)
@@ -127,7 +135,8 @@ func lineChannel(r io.Reader) chan string {
 		buffer := bufio.NewReader(r)
 		for {
 			line, _ := buffer.ReadString(10)
-			line = strings.TrimSuffix(strings.TrimSuffix(line, "\r\n"), "\r");
+			// A modem ends a line with CRLF, and some adapters with LF alone.
+			line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 			if line == "" {
 				continue
 			}
@@ -157,7 +166,7 @@ func parsePacket(status, header, body string) Packet {
 
 	ls := strings.SplitN(header, ":", 2)
 	if len(ls) != 2 {
-		return UnknownPacket{header, []interface{}{}}
+		return UnknownPacket{header, []any{}}
 	}
 	uargs := strings.TrimSpace(ls[1])
 	args := unquotes(uargs)
@@ -287,7 +296,7 @@ func (self *Modem) listen() {
 	}
 }
 
-func formatCommand(cmd string, args ...interface{}) string {
+func formatCommand(cmd string, args ...any) string {
 	line := "AT" + cmd
 	if len(args) > 0 {
 		line += "=" + quotes(args)
@@ -296,7 +305,7 @@ func formatCommand(cmd string, args ...interface{}) string {
 	return line
 }
 
-func (self *Modem) sendBody(cmd string, body string, args ...interface{}) (Packet, error) {
+func (self *Modem) sendBody(cmd string, body string, args ...any) (Packet, error) {
 	self.tx <- formatCommand(cmd, args...)
 	self.tx <- body + "\x1a"
 	response := <-self.rx
@@ -306,7 +315,7 @@ func (self *Modem) sendBody(cmd string, body string, args ...interface{}) (Packe
 	return response, nil
 }
 
-func (self *Modem) send(cmd string, args ...interface{}) (Packet, error) {
+func (self *Modem) send(cmd string, args ...any) (Packet, error) {
 	self.tx <- formatCommand(cmd, args...)
 	response := <-self.rx
 	if _, e := response.(ERROR); e {
@@ -348,7 +357,7 @@ func (self *Modem) init() error {
 
 	log.Println("Set SMS text mode")
 	// get SMSC
-	// the modem complains if SMSC hasn't been set, but stores it correctly, so
+	// the modem complains if SMSC has not been set, but stores it correctly, so
 	// query for stored value, then send a set from the query response.
 	r, err = self.send("+CSCA?")
 	if err != nil {
