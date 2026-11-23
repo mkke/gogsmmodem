@@ -48,20 +48,26 @@ func TestInit(t *testing.T) {
 	modem.Close()
 }
 
+// assertOOBCommands reads commands from modem.OOB in order, closes modem, and
+// checks that OOB then closes without a further packet.
 func assertOOBCommands(t *testing.T, modem *Modem, commands []Packet) {
-	for i := range modem.OOB {
-		if len(commands) == 0 {
-			t.Errorf("Unexpected extra command: %#v", i)
-			break
+	t.Helper()
+	for _, want := range commands {
+		select {
+		case got, ok := <-modem.OOB:
+			if !ok {
+				t.Fatalf("OOB closed, expected: %#v", want)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Expected: %#v, got: %#v", want, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("no packet on OOB, expected: %#v", want)
 		}
-		head := commands[0]
-		if !reflect.DeepEqual(i, head) {
-			t.Errorf("Expected: %#v, got: %#v", head, i)
-		}
-		commands = commands[1:]
 	}
-	if len(commands) > 0 {
-		t.Errorf("Expected: %d more commands", len(commands))
+	modem.Close()
+	for extra := range modem.OOB {
+		t.Errorf("Unexpected extra command: %#v", extra)
 	}
 }
 
@@ -89,7 +95,6 @@ func TestOOB(t *testing.T) {
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
-	modem.Close()
 	assertOOBCommands(t, modem, oobCommands)
 }
 
@@ -106,8 +111,68 @@ func TestIncoming(t *testing.T) {
 	if err != nil {
 		t.Error("Expected: no error, got:", err)
 	}
-	modem.Close()
 	assertOOBCommands(t, modem, receivedCommands)
+}
+
+// A Close while listen waits to put a packet on a full OOB returns, and OOB
+// then closes after the packets it holds.
+func TestCloseStopsListen(t *testing.T) {
+	// More reports than OOB holds.
+	var replay []string
+	for i := 0; i < 20; i++ {
+		replay = append(replay, "<-\r\n+CMTI: \"SM\",5\r\n")
+	}
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, replay)), false)
+	if err != nil {
+		t.Fatal("Expected: no error, got:", err)
+	}
+	for deadline := time.Now().Add(time.Second); len(modem.OOB) < cap(modem.OOB); {
+		if time.Now().After(deadline) {
+			t.Fatalf("OOB holds %d packets, want %d", len(modem.OOB), cap(modem.OOB))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	closed := make(chan error)
+	go func() { closed <- modem.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("Close() = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+	for range modem.OOB {
+	}
+	if err := modem.Close(); err != nil {
+		t.Errorf("second Close() = %v", err)
+	}
+	if _, err := modem.GetMessage(1); err != ErrClosed {
+		t.Errorf("GetMessage after Close: err = %v, want ErrClosed", err)
+	}
+}
+
+// A failed read from the port, as when a USB modem is pulled, stops listen:
+// OOB closes and a command returns ErrClosed.
+func TestReadErrorClosesOOB(t *testing.T) {
+	port := NewMockSerialPort(appendLists(initReplay))
+	modem, err := New(port, false)
+	if err != nil {
+		t.Fatal("Expected: no error, got:", err)
+	}
+	port.Close()
+	select {
+	case _, ok := <-modem.OOB:
+		if ok {
+			t.Error("Expected: OOB closed, got a packet")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OOB not closed after a read error")
+	}
+	if _, err := modem.GetMessage(1); err != ErrClosed {
+		t.Errorf("GetMessage: err = %v, want ErrClosed", err)
+	}
+	modem.Close()
 }
 
 var messageReplay = []string{

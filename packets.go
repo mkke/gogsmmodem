@@ -2,19 +2,21 @@ package gogsmmodem
 
 import "time"
 
-type Packet interface{}
+// Packet is an answer or a report that the modem sent. Its dynamic type is
+// one of the types in this file.
+type Packet any
 
-// +ZPASR
+// ServiceStatus is a +ZPASR report: the service the modem has.
 type ServiceStatus struct {
 	Status string
 }
 
-// +ZDONR
+// NetworkStatus is a +ZDONR report: the network the modem is on.
 type NetworkStatus struct {
 	Network string
 }
 
-// ˆHCSQ
+// SignalStatus is a ^HCSQ report: the system mode and its signal values.
 type SignalStatus struct {
 	Signal string
 	RSSI int
@@ -23,23 +25,23 @@ type SignalStatus struct {
 	RSRQ int
 }
 
-// ^RSSI
+// RSSIStatus is a ^RSSI report: the received signal strength.
 type RSSIStatus struct {
 	RSSI int
 }
 
-// +CMTI
+// MessageNotification is a +CMTI report: a new message at Index in Storage.
 type MessageNotification struct {
 	Storage string
 	Index   int
 }
 
-// +CSCA
+// SMSCAddress is the +CSCA answer: the service centre address.
 type SMSCAddress struct {
-	Args []interface{}
+	Args []any
 }
 
-// +CMGR
+// Message is a +CMGR or +CMGL answer: one stored message.
 type Message struct {
 	Index     int
 	Status    string
@@ -49,29 +51,35 @@ type Message struct {
 	Last      bool
 }
 
-// +CPMS=?
+// StorageAreas is the +CPMS=? answer: the storage areas the modem offers.
 type StorageAreas struct {
 	Received []string
 	Sent     []string
 	New      []string
 }
 
-// +CPMS=...
+// StorageInfo is the answer of +CPMS with areas: the used and the maximum
+// space of each area.
 type StorageInfo struct {
 	UsedSpace1, MaxSpace1, UsedSpace2, MaxSpace2, UsedSpace3, MaxSpace3 int
 }
 
-// +CMGL
+// MessageList is the +CMGL answer: the stored messages.
 type MessageList []Message
 
-// Simple OK response
+// OK is the answer of a command the modem accepted.
 type OK struct{}
 
-// Simple ERROR response
-type ERROR struct{}
+// ERROR is the answer of a command the modem refused.
+type ERROR struct {
+	// Status is the modem's final line: ERROR, +CME ERROR: <n> or
+	// +CMS ERROR: <n>.
+	Status string
+}
 
-// Unknown
+// UnknownPacket is a line the package does not parse: its command and its
+// arguments.
 type UnknownPacket struct {
 	Command string
-	Args    []interface{}
+	Args    []any
 }

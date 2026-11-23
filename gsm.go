@@ -2,6 +2,11 @@
 // that takes AT commands in text mode. New initialises the modem on a port
 // the caller has opened. The reports the modem sends without a command, such
 // as a new-message notification, arrive on Modem.OOB.
+//
+// One goroutine per Modem reads the port and writes the commands. It stops
+// on Close and on the first failed read from the port, and then closes OOB,
+// so a caller ranging over OOB sees the end of the modem either way. A
+// command after that returns ErrClosed.
 package gogsmmodem
 
 import (
@@ -11,6 +16,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Modem is a GSM modem that New has initialised. Each method sends one AT
@@ -23,6 +29,10 @@ type Modem struct {
 	port  io.ReadWriteCloser
 	rx    chan Packet
 	tx    chan string
+	// done is closed to stop listen, and stopped is closed when it has.
+	done      chan struct{}
+	stopped   chan struct{}
+	closeOnce sync.Once
 }
 
 // New initialises the modem on port and returns it. The caller opens port
@@ -36,28 +46,40 @@ func New(port io.ReadWriteCloser, debug bool) (*Modem, error) {
 	rx := make(chan Packet)
 	tx := make(chan string)
 	modem := &Modem{
-		OOB:   oob,
-		Debug: debug,
-		port:  port,
-		rx:    rx,
-		tx:    tx,
+		OOB:     oob,
+		Debug:   debug,
+		port:    port,
+		rx:      rx,
+		tx:      tx,
+		done:    make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
 	// run send/receive goroutine
 	go modem.listen()
 
 	if err := modem.init(); err != nil {
+		// The port stays open for the caller to close, and closing it ends
+		// the read that lineChannel's goroutine is blocked in.
+		close(modem.done)
+		<-modem.stopped
 		return nil, err
 	}
 	return modem, nil
 }
 
-// Close closes OOB and the port, and returns the error of closing the port.
-// The Modem cannot be used after Close.
+// Close stops the goroutine that reads the port, closes the port and returns
+// the error of closing it. It returns once that goroutine has stopped. The
+// packets already on OOB stay readable, and OOB is closed after them. A
+// command after Close returns ErrClosed, and a second Close returns nil.
 func (self *Modem) Close() error {
-	close(self.OOB)
-	close(self.rx)
-	// close(self.tx)
-	return self.port.Close()
+	var err error
+	self.closeOnce.Do(func() {
+		close(self.done)
+		// Closing the port ends a write that listen is blocked in.
+		err = self.port.Close()
+	})
+	<-self.stopped
+	return err
 }
 
 // Commands
@@ -96,7 +118,9 @@ func (self *Modem) ListMessages(filter string) (*MessageList, error) {
 			return nil, errors.New("Unexpected error")
 		}
 
-		packet = <-self.rx
+		if packet, err = self.receive(); err != nil {
+			return nil, err
+		}
 	}
 	return &res, nil
 }
@@ -129,18 +153,31 @@ func (self *Modem) SendMessage(telephone, body string) error {
 	return err
 }
 
-func lineChannel(r io.Reader) chan string {
+// lineChannel returns the lines read from r, without their line ends and
+// without empty lines. The channel is closed after the first read error, or
+// when done is closed.
+func lineChannel(r io.Reader, done <-chan struct{}) <-chan string {
 	ret := make(chan string)
 	go func() {
+		defer close(ret)
 		buffer := bufio.NewReader(r)
 		for {
-			line, _ := buffer.ReadString(10)
+			line, err := buffer.ReadString(10)
 			// A modem ends a line with CRLF, and some adapters with LF alone.
 			line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-			if line == "" {
-				continue
+			if line != "" {
+				select {
+				case ret <- line:
+				case <-done:
+					return
+				}
 			}
-			ret <- line
+			// bufio reports ErrNoProgress after 100 reads that returned
+			// no data and no error, which is what a port with a read
+			// timeout returns on an idle line.
+			if err != nil && err != io.ErrNoProgress {
+				return
+			}
 		}
 	}()
 	return ret
@@ -160,7 +197,7 @@ func parsePacket(status, header, body string) Packet {
 		if status == "OK" {
 			return OK{}
 		} else {
-			return ERROR{}
+			return ERROR{Status: status}
 		}
 	}
 
@@ -246,31 +283,50 @@ func parsePacket(status, header, body string) Packet {
 		if status == "OK" {
 			return OK{}
 		} else {
-			return ERROR{}
+			return ERROR{Status: status}
 		}
 	}
 	return UnknownPacket{ls[0], args}
 }
 
+// listen reads the port and writes the commands from tx until done is closed
+// or a read from the port fails. Each send it makes also waits on done, so
+// Close never waits for a reader of rx or OOB. It closes OOB and then stopped
+// when it returns.
 func (self *Modem) listen() {
-	in := lineChannel(self.port)
+	defer close(self.stopped)
+	defer close(self.OOB)
+	in := lineChannel(self.port, self.done)
 	var echo, last, header, body string
 	for {
 		select {
-		case line := <-in:
+		case <-self.done:
+			return
+		case line, ok := <-in:
+			if !ok {
+				return
+			}
 			if line == echo {
 				continue // ignore echo of command
 			} else if last != "" && startsWith(line, last) {
 				if header != "" {
 					// first of multiple responses (eg CMGL)
 					packet := parsePacket("", header, body)
-					self.rx <- packet
+					select {
+					case self.rx <- packet:
+					case <-self.done:
+						return
+					}
 				}
 				header = line
 				body = ""
 			} else if isFinalStatus(line) {
 				packet := parsePacket(line, header, body)
-				self.rx <- packet
+				select {
+				case self.rx <- packet:
+				case <-self.done:
+					return
+				}
 				header = ""
 				body = ""
 			} else if header != "" {
@@ -282,7 +338,11 @@ func (self *Modem) listen() {
 				// OOB packet
 				p := parsePacket("OK", line, "")
 				if p != nil {
-					self.OOB <- p
+					select {
+					case self.OOB <- p:
+					case <-self.done:
+						return
+					}
 				}
 			}
 		case line := <-self.tx:
@@ -305,21 +365,60 @@ func formatCommand(cmd string, args ...any) string {
 	return line
 }
 
+// transmit hands line to listen for writing to the port. It returns
+// ErrClosed when listen has stopped.
+func (self *Modem) transmit(line string) error {
+	select {
+	case self.tx <- line:
+		return nil
+	case <-self.stopped:
+		return ErrClosed
+	}
+}
+
+// receive returns the next answer that listen has read. It returns ErrClosed
+// when listen has stopped.
+func (self *Modem) receive() (Packet, error) {
+	select {
+	case packet := <-self.rx:
+		return packet, nil
+	case <-self.stopped:
+		return nil, ErrClosed
+	}
+}
+
+// sendBody sends the AT command cmd with args, then body, and returns the
+// modem's answer, as send does.
 func (self *Modem) sendBody(cmd string, body string, args ...any) (Packet, error) {
-	self.tx <- formatCommand(cmd, args...)
-	self.tx <- body + "\x1a"
-	response := <-self.rx
-	if _, e := response.(ERROR); e {
-		return response, errors.New("Response was ERROR")
+	if err := self.transmit(formatCommand(cmd, args...)); err != nil {
+		return nil, err
+	}
+	if err := self.transmit(body + "\x1a"); err != nil {
+		return nil, err
+	}
+	response, err := self.receive()
+	if err != nil {
+		return nil, err
+	}
+	if e, ok := response.(ERROR); ok {
+		return response, newModemError(cmd, e.Status)
 	}
 	return response, nil
 }
 
+// send sends the AT command cmd with args and returns the modem's answer.
+// An answer of ERROR, +CME ERROR or +CMS ERROR comes back as a *ModemError,
+// and a Modem whose reader has stopped returns ErrClosed.
 func (self *Modem) send(cmd string, args ...any) (Packet, error) {
-	self.tx <- formatCommand(cmd, args...)
-	response := <-self.rx
-	if _, e := response.(ERROR); e {
-		return response, errors.New("Response was ERROR")
+	if err := self.transmit(formatCommand(cmd, args...)); err != nil {
+		return nil, err
+	}
+	response, err := self.receive()
+	if err != nil {
+		return nil, err
+	}
+	if e, ok := response.(ERROR); ok {
+		return response, newModemError(cmd, e.Status)
 	}
 	return response, nil
 }

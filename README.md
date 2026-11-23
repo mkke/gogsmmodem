@@ -55,6 +55,17 @@ func main() {
 ```
 
 ### Changelog
+0.2.0
+
+- `New` takes a port the caller has opened.
+- A command the modem refuses returns a `*ModemError` with the `+CME` or
+  `+CMS` code.
+- `Close` stops the goroutine that reads the port, and a second `Close`
+  returns nil.
+- A command after `Close`, or after a failed read from the port, returns
+  `ErrClosed`.
+- A failed read from the port closes `OOB`.
+
 0.1.0
 
 - First release
