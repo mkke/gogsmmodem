@@ -152,6 +152,51 @@ func TestCloseStopsListen(t *testing.T) {
 	}
 }
 
+// withCommandTimeout sets commandTimeout to d until the test ends.
+func withCommandTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := commandTimeout
+	commandTimeout = d
+	t.Cleanup(func() { commandTimeout = prev })
+}
+
+// A modem that does not answer the reset makes New return ErrTimeout.
+func TestInitTimeout(t *testing.T) {
+	withCommandTimeout(t, 20*time.Millisecond)
+	port := NewMockSerialPort([]string{"->ATZ\r\n"})
+	if _, err := New(port, false); err != ErrTimeout {
+		t.Errorf("New: err = %v, want ErrTimeout", err)
+	}
+	port.Close()
+}
+
+// A command without an answer returns ErrTimeout and stops listen: OOB
+// closes and the next command returns ErrClosed.
+func TestCommandTimeout(t *testing.T) {
+	withCommandTimeout(t, 20*time.Millisecond)
+	modem, err := New(NewMockSerialPort(appendLists(initReplay, []string{"->AT+CMGR=1\r\n"})), false)
+	if err != nil {
+		t.Fatal("Expected: no error, got:", err)
+	}
+	if _, err := modem.GetMessage(1); err != ErrTimeout {
+		t.Errorf("GetMessage: err = %v, want ErrTimeout", err)
+	}
+	select {
+	case _, ok := <-modem.OOB:
+		if ok {
+			t.Error("Expected: OOB closed, got a packet")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OOB not closed after a timeout")
+	}
+	if _, err := modem.GetMessage(1); err != ErrClosed {
+		t.Errorf("GetMessage after the timeout: err = %v, want ErrClosed", err)
+	}
+	if err := modem.Close(); err != nil {
+		t.Errorf("Close() = %v", err)
+	}
+}
+
 // A failed read from the port, as when a USB modem is pulled, stops listen:
 // OOB closes and a command returns ErrClosed.
 func TestReadErrorClosesOOB(t *testing.T) {

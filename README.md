@@ -55,6 +55,11 @@ func main() {
 ```
 
 ### Changelog
+0.3.0
+
+- A command the modem does not answer within `CommandTimeout` returns
+  `ErrTimeout`, and the `Modem` stops reading the port and closes `OOB`.
+
 0.2.0
 
 - `New` takes a port the caller has opened.

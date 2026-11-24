@@ -4,9 +4,10 @@
 // as a new-message notification, arrive on Modem.OOB.
 //
 // One goroutine per Modem reads the port and writes the commands. It stops
-// on Close and on the first failed read from the port, and then closes OOB,
-// so a caller ranging over OOB sees the end of the modem either way. A
-// command after that returns ErrClosed.
+// on Close, on the first failed read from the port, and when a command gets
+// no answer within CommandTimeout. It then closes OOB, so a caller ranging
+// over OOB sees the end of the modem in each case. A command after that
+// returns ErrClosed.
 package gogsmmodem
 
 import (
@@ -17,7 +18,15 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
+
+// CommandTimeout bounds the wait for the answer to one command. It covers
+// +CMGS, which waits for the network to take the message.
+const CommandTimeout = 2 * time.Minute
+
+// commandTimeout is the bound in force. The tests shorten it.
+var commandTimeout = CommandTimeout
 
 // Modem is a GSM modem that New has initialised. Each method sends one AT
 // command and waits for its reply, so a Modem serves one caller at a time.
@@ -32,6 +41,7 @@ type Modem struct {
 	// done is closed to stop listen, and stopped is closed when it has.
 	done      chan struct{}
 	stopped   chan struct{}
+	stopOnce  sync.Once
 	closeOnce sync.Once
 }
 
@@ -58,13 +68,18 @@ func New(port io.ReadWriteCloser, debug bool) (*Modem, error) {
 	go modem.listen()
 
 	if err := modem.init(); err != nil {
-		// The port stays open for the caller to close, and closing it ends
-		// the read that lineChannel's goroutine is blocked in.
-		close(modem.done)
-		<-modem.stopped
+		// The port stays open for the caller to close. Closing it ends a
+		// write that listen is blocked in and the read that lineChannel's
+		// goroutine is blocked in, so New does not wait for them.
+		modem.stop()
 		return nil, err
 	}
 	return modem, nil
+}
+
+// stop tells listen to stop, without waiting for it.
+func (self *Modem) stop() {
+	self.stopOnce.Do(func() { close(self.done) })
 }
 
 // Close stops the goroutine that reads the port, closes the port and returns
@@ -74,7 +89,7 @@ func New(port io.ReadWriteCloser, debug bool) (*Modem, error) {
 func (self *Modem) Close() error {
 	var err error
 	self.closeOnce.Do(func() {
-		close(self.done)
+		self.stop()
 		// Closing the port ends a write that listen is blocked in.
 		err = self.port.Close()
 	})
@@ -108,6 +123,9 @@ func (self *Modem) ListMessages(filter string) (*MessageList, error) {
 		return &res, nil
 	}
 
+	// The messages after the first get a deadline of their own.
+	deadline := time.NewTimer(commandTimeout)
+	defer deadline.Stop()
 	for {
 		if msg, ok := packet.(Message); ok {
 			res = append(res, msg)
@@ -118,7 +136,7 @@ func (self *Modem) ListMessages(filter string) (*MessageList, error) {
 			return nil, errors.New("Unexpected error")
 		}
 
-		if packet, err = self.receive(); err != nil {
+		if packet, err = self.receive(deadline.C); err != nil {
 			return nil, err
 		}
 	}
@@ -366,37 +384,51 @@ func formatCommand(cmd string, args ...any) string {
 }
 
 // transmit hands line to listen for writing to the port. It returns
-// ErrClosed when listen has stopped.
-func (self *Modem) transmit(line string) error {
+// ErrClosed when listen has stopped, and ErrTimeout at deadline.
+func (self *Modem) transmit(line string, deadline <-chan time.Time) error {
 	select {
 	case self.tx <- line:
 		return nil
 	case <-self.stopped:
 		return ErrClosed
+	case <-deadline:
+		return self.expire()
 	}
 }
 
 // receive returns the next answer that listen has read. It returns ErrClosed
-// when listen has stopped.
-func (self *Modem) receive() (Packet, error) {
+// when listen has stopped, and ErrTimeout at deadline.
+func (self *Modem) receive(deadline <-chan time.Time) (Packet, error) {
 	select {
 	case packet := <-self.rx:
 		return packet, nil
 	case <-self.stopped:
 		return nil, ErrClosed
+	case <-deadline:
+		return nil, self.expire()
 	}
+}
+
+// expire stops listen after a command missed its deadline, and returns
+// ErrTimeout. The modem's state is unknown then, and a late answer would be
+// taken for the answer to the next command.
+func (self *Modem) expire() error {
+	self.stop()
+	return ErrTimeout
 }
 
 // sendBody sends the AT command cmd with args, then body, and returns the
 // modem's answer, as send does.
 func (self *Modem) sendBody(cmd string, body string, args ...any) (Packet, error) {
-	if err := self.transmit(formatCommand(cmd, args...)); err != nil {
+	deadline := time.NewTimer(commandTimeout)
+	defer deadline.Stop()
+	if err := self.transmit(formatCommand(cmd, args...), deadline.C); err != nil {
 		return nil, err
 	}
-	if err := self.transmit(body + "\x1a"); err != nil {
+	if err := self.transmit(body+"\x1a", deadline.C); err != nil {
 		return nil, err
 	}
-	response, err := self.receive()
+	response, err := self.receive(deadline.C)
 	if err != nil {
 		return nil, err
 	}
@@ -408,12 +440,15 @@ func (self *Modem) sendBody(cmd string, body string, args ...any) (Packet, error
 
 // send sends the AT command cmd with args and returns the modem's answer.
 // An answer of ERROR, +CME ERROR or +CMS ERROR comes back as a *ModemError,
-// and a Modem whose reader has stopped returns ErrClosed.
+// and a Modem whose reader has stopped returns ErrClosed. Without an answer
+// within commandTimeout it returns ErrTimeout and stops the reader.
 func (self *Modem) send(cmd string, args ...any) (Packet, error) {
-	if err := self.transmit(formatCommand(cmd, args...)); err != nil {
+	deadline := time.NewTimer(commandTimeout)
+	defer deadline.Stop()
+	if err := self.transmit(formatCommand(cmd, args...), deadline.C); err != nil {
 		return nil, err
 	}
-	response, err := self.receive()
+	response, err := self.receive(deadline.C)
 	if err != nil {
 		return nil, err
 	}

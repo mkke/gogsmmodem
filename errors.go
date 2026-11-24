@@ -10,6 +10,11 @@ import (
 // port failed.
 var ErrClosed = errors.New("gogsmmodem: modem closed")
 
+// ErrTimeout is the error of a command the modem did not answer within
+// CommandTimeout. The Modem then stops reading the port and closes OOB. The
+// port stays open until Close.
+var ErrTimeout = errors.New("gogsmmodem: no answer from the modem")
+
 // CME error codes of 3GPP TS 27.007 section 9.2 that a caller tells apart.
 const (
 	CMESIMNotInserted = 10
